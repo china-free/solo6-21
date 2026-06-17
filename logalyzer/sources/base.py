@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Iterator, Optional, Dict, Any
+from typing import Iterator, Optional, Dict, Any, Tuple
 from datetime import datetime
 import json
 
@@ -35,6 +35,17 @@ class LogEntry:
     def __str__(self) -> str:
         return f"[{self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{self.level}] [{self.source}] {self.raw_message}"
 
+    def dedup_key(self) -> str:
+        return f"{self.source}|{self.timestamp.isoformat()}|{self.raw_message}"
+
+    def __hash__(self):
+        return hash(self.dedup_key())
+
+    def __eq__(self, other):
+        if not isinstance(other, LogEntry):
+            return False
+        return self.dedup_key() == other.dedup_key()
+
 
 class LogSource(ABC):
     def __init__(self, name: str, config: Dict[str, Any]):
@@ -58,6 +69,23 @@ class LogSource(ABC):
         follow: bool = False,
     ) -> Iterator[LogEntry]:
         pass
+
+    def fetch_logs_incremental(
+        self,
+        cursor: Optional[Dict[str, Any]] = None,
+        end_time: Optional[datetime] = None,
+        follow: bool = False,
+    ) -> Iterator[Tuple[LogEntry, Dict[str, Any]]]:
+        cursor = cursor or {}
+        start_time = None
+        if cursor and "last_timestamp" in cursor and cursor["last_timestamp"]:
+            start_time = datetime.fromisoformat(cursor["last_timestamp"])
+        current_cursor = dict(cursor)
+        for entry in self.fetch_logs(start_time, end_time, follow):
+            current_cursor["last_timestamp"] = entry.timestamp.isoformat()
+            current_cursor["last_line"] = entry.raw_message
+            current_cursor["last_message_hash"] = entry.dedup_key()
+            yield entry, dict(current_cursor)
 
     def __enter__(self) -> "LogSource":
         self.connect()

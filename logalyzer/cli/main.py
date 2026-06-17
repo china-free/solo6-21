@@ -209,15 +209,27 @@ def collect_run(
         alert_engine.add_alert_callback(lambda a: _print_alert(a, no_color))
     
     collected_logs: List[LogEntry] = []
+    latest_cursors: Dict[str, Dict[str, Any]] = {}
     
     try:
-        log_stream = aggregator.aggregate(start_dt, end_dt, follow)
+        source_cursors: Dict[str, Dict[str, Any]] = {}
+        if start_dt:
+            for s in sources:
+                source_cursors[s.name] = {"last_timestamp": start_dt.isoformat()}
+        log_stream = aggregator.aggregate_incremental(source_cursors, end_dt, follow)
+        def _wrap():
+            nonlocal latest_cursors
+            for entry, cursor_map in log_stream:
+                for src, cur in cursor_map.items():
+                    latest_cursors[src] = cur
+                yield entry
+        stream = _wrap()
         if not no_filter:
-            log_stream = filter_engine.filter(log_stream)
+            stream = filter_engine.filter(stream)
         if not no_alert:
-            log_stream = alert_engine.process_entries(log_stream)
+            stream = alert_engine.process_entries(stream)
         
-        for entry in log_stream:
+        for entry in stream:
             collected_logs.append(entry)
             _print_entry(entry, show_source=True, no_color=no_color)
             
@@ -234,6 +246,7 @@ def collect_run(
             click.echo(f"{Fore.YELLOW}Triggered {len(alerts)} alert(s){Style.RESET_ALL}")
         
         if save_session:
+            from ..session.manager import SourceCursor
             session_manager = SessionManager(config.session_dir)
             session = session_manager.create_session(
                 name=save_session,
@@ -245,8 +258,11 @@ def collect_run(
                 start_time=start_dt,
                 end_time=end_dt,
             )
+            for src_name, cur_dict in latest_cursors.items():
+                session.source_cursors[src_name] = SourceCursor.from_dict(cur_dict)
             session_path = session_manager.save_session(session)
             click.echo(f"{Fore.GREEN}Session saved: {session.id} -> {session_path}{Style.RESET_ALL}")
+            click.echo(f"{Fore.BLUE}  Source cursors saved for resume.{Style.RESET_ALL}")
 
 
 @collect.command("sources")
@@ -277,6 +293,21 @@ def collect_sources(ctx):
             click.echo(f"      Provider: {src.config.get('provider', 's3')}")
             click.echo(f"      Bucket: {src.config.get('bucket', 'N/A')}")
             click.echo(f"      Prefix: {src.config.get('prefix', '')}")
+
+
+@collect.command("resume")
+@click.argument("session_id")
+@click.option("--source", "-s", multiple=True, help="Resume only specific source(s)")
+@click.option("--end-time", "-e", help="End time for incremental collection")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output in real-time after resume")
+@click.option("--output", "-o", help="Output file path to append new logs")
+@click.option("--no-filter", is_flag=True, help="Do not apply saved filters")
+@click.option("--no-alert", is_flag=True, help="Do not apply saved alert engine")
+@click.option("--no-save", is_flag=True, help="Do not update the session (dry run)")
+@click.pass_context
+def collect_resume(ctx, **kwargs):
+    """Alias for 'session resume' - incrementally collect new logs into a saved session."""
+    ctx.invoke(session_resume, **kwargs)
 
 
 @cli.group()
@@ -519,8 +550,18 @@ def session_list(ctx):
     for s in sessions:
         created_at = datetime.fromisoformat(s["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
         sources = ", ".join(s["source_names"]) if s["source_names"] else "N/A"
-        click.echo(f"  {Fore.BLUE}{s['id']}{Style.RESET_ALL} - {s['name']}")
+        resumable_tag = f"{Fore.GREEN}[resumable]{Style.RESET_ALL}" if s.get("has_cursors") else ""
+        click.echo(f"  {Fore.BLUE}{s['id']}{Style.RESET_ALL} - {s['name']} {resumable_tag}")
         click.echo(f"      Created: {created_at}")
+        if s.get("updated_at"):
+            updated_at = datetime.fromisoformat(s["updated_at"]).strftime("%Y-%m-%d %H:%M:%S")
+            click.echo(f"      Updated: {updated_at}")
+        if s.get("last_collected_at"):
+            lc = datetime.fromisoformat(s["last_collected_at"]).strftime("%Y-%m-%d %H:%M:%S")
+            click.echo(f"      Last collected: {lc}")
+        if s.get("latest_log_timestamp"):
+            lt = datetime.fromisoformat(s["latest_log_timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+            click.echo(f"      Latest log: {lt}")
         click.echo(f"      Logs: {s['log_count']} entries")
         click.echo(f"      Sources: {sources}")
         if s["description"]:
@@ -563,10 +604,136 @@ def session_show(ctx, session_id: str, count: int, tail: int):
     elif count:
         entries = entries[:count]
     
+    if session.source_cursors:
+        click.echo(f"\n{Fore.BLUE}Source cursors (for resume):{Style.RESET_ALL}")
+        for src, cur in session.source_cursors.items():
+            ts_str = cur.last_timestamp.strftime("%Y-%m-%d %H:%M:%S") if cur.last_timestamp else "N/A"
+            click.echo(f"  - {src}: latest={ts_str}, offset={cur.last_offset}")
+    
     if entries:
         click.echo(f"\n{Fore.BLUE}Log entries:{Style.RESET_ALL}")
         for entry in entries:
             _print_entry(entry, show_source=True, no_color=no_color)
+
+
+@session.command("resume")
+@click.argument("session_id")
+@click.option("--source", "-s", multiple=True, help="Resume only specific source(s)")
+@click.option("--end-time", "-e", help="End time for incremental collection")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output in real-time after resume")
+@click.option("--output", "-o", help="Output file path to append new logs")
+@click.option("--no-filter", is_flag=True, help="Do not apply saved filters")
+@click.option("--no-alert", is_flag=True, help="Do not apply saved alert engine")
+@click.option("--no-save", is_flag=True, help="Do not update the session (dry run)")
+@click.pass_context
+def session_resume(
+    ctx,
+    session_id: str,
+    source: List[str],
+    end_time: str,
+    follow: bool,
+    output: str,
+    no_filter: bool,
+    no_alert: bool,
+    no_save: bool,
+):
+    """Resume analysis from a saved session (incremental collection + state preservation)."""
+    config = ctx.obj["config"]
+    no_color = ctx.obj["no_color"]
+
+    session_manager = SessionManager(config.session_dir)
+    session = session_manager.load_session(session_id)
+    if not session:
+        click.echo(f"{Fore.RED}Session not found: {session_id}{Style.RESET_ALL}", err=True)
+        sys.exit(1)
+
+    try:
+        end_dt = _parse_time(end_time) if end_time else None
+    except click.BadParameter as e:
+        click.echo(f"{Fore.RED}{e}{Style.RESET_ALL}", err=True)
+        sys.exit(1)
+
+    source_names_to_use = list(source) if source else list(session.source_names)
+    sources = _create_sources_from_config(config, source_names_to_use)
+    if not sources:
+        click.echo(f"{Fore.RED}No valid sources to resume{Style.RESET_ALL}", err=True)
+        sys.exit(1)
+
+    existing_count = len(session.log_entries)
+    click.echo(f"{Fore.BLUE}Resuming session {session_id} ('{session.name}'){Style.RESET_ALL}")
+    click.echo(f"  Existing logs: {existing_count} entries")
+    click.echo(f"  Sources: {', '.join(source_names_to_use)}")
+    latest_ts = session.get_latest_timestamp()
+    if latest_ts:
+        click.echo(f"  Last known timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    source_cursors = session_manager.build_source_cursors(session)
+    for src_name in list(source_cursors.keys()):
+        if src_name not in source_names_to_use:
+            del source_cursors[src_name]
+    for s in sources:
+        if s.name not in source_cursors:
+            source_cursors[s.name] = {}
+
+    aggregator = LogAggregator(sources)
+
+    filter_engine = session.filter_engine if (session.filter_engine and not no_filter) else FilterEngine()
+    alert_engine = session.alert_engine if (session.alert_engine and not no_alert) else AlertEngine()
+    if not session.alert_engine or no_alert:
+        alert_engine.add_rules_from_config(config.alert_rules)
+
+    new_alerts_before = set(id(a) for a in alert_engine.check_alerts()) if not no_alert else set()
+    if not no_alert:
+        alert_engine.add_alert_callback(lambda a: _print_alert(a, no_color))
+
+    new_entries: List[LogEntry] = []
+    latest_cursors: Dict[str, Dict[str, Any]] = dict(source_cursors)
+
+    try:
+        log_stream = aggregator.aggregate_incremental(source_cursors, end_dt, follow)
+        def _wrap():
+            nonlocal latest_cursors
+            for entry, cursor_map in log_stream:
+                for src, cur in cursor_map.items():
+                    latest_cursors[src] = cur
+                yield entry
+        stream = _wrap()
+        if not no_filter:
+            stream = filter_engine.filter(stream)
+        if not no_alert:
+            stream = alert_engine.process_entries(stream)
+
+        for entry in stream:
+            new_entries.append(entry)
+            _print_entry(entry, show_source=True, no_color=no_color)
+            if output:
+                with open(output, "a", encoding="utf-8") as f:
+                    f.write(str(entry) + "\n")
+    except KeyboardInterrupt:
+        click.echo(f"\n{Fore.YELLOW}Interrupted by user{Style.RESET_ALL}")
+    finally:
+        click.echo(f"\n{Fore.BLUE}Resume summary:{Style.RESET_ALL}")
+        click.echo(f"  Existing entries: {existing_count}")
+        click.echo(f"  New entries (after dedup): {len(new_entries)}")
+
+        if not no_save and new_entries:
+            from ..session.manager import SourceCursor
+            added = session_manager.apply_incremental_result(session, new_entries, latest_cursors)
+            session.filter_engine = filter_engine
+            session.alert_engine = alert_engine
+            if end_dt:
+                session.end_time = end_dt
+            session_path = session_manager.save_session(session)
+            click.echo(f"  {Fore.GREEN}Session updated: {len(added)} new entries merged{Style.RESET_ALL}")
+            click.echo(f"    File: {session_path}")
+        elif not no_save and not new_entries:
+            click.echo(f"  {Fore.YELLOW}No new entries; session not modified{Style.RESET_ALL}")
+
+        if not no_alert:
+            all_alerts = alert_engine.check_alerts()
+            new_triggered = [a for a in all_alerts if id(a) not in new_alerts_before]
+            if new_triggered:
+                click.echo(f"  {Fore.YELLOW}New alerts triggered during resume: {len(new_triggered)}{Style.RESET_ALL}")
 
 
 @session.command("delete")

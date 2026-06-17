@@ -1,5 +1,5 @@
 from .base import LogSource, LogEntry
-from typing import Iterator, Optional, Dict, Any
+from typing import Iterator, Optional, Dict, Any, Tuple
 from datetime import datetime
 import time
 import paramiko
@@ -54,47 +54,87 @@ class SSHSource(LogSource):
         end_time: Optional[datetime] = None,
         follow: bool = False,
     ) -> Iterator[LogEntry]:
+        for entry, _ in self.fetch_logs_incremental(
+            cursor={"last_timestamp": start_time.isoformat()} if start_time else None,
+            end_time=end_time,
+            follow=follow,
+        ):
+            yield entry
+
+    def fetch_logs_incremental(
+        self,
+        cursor: Optional[Dict[str, Any]] = None,
+        end_time: Optional[datetime] = None,
+        follow: bool = False,
+    ) -> Iterator[Tuple[LogEntry, Dict[str, Any]]]:
         if not self.is_connected:
             self.connect()
 
+        cursor = cursor or {}
+        start_offset = int(cursor.get("last_offset", 0) or 0)
+        start_time = None
+        if cursor.get("last_timestamp"):
+            start_time = datetime.fromisoformat(cursor["last_timestamp"])
+        last_line_seen = cursor.get("last_line", "")
+        current_cursor = dict(cursor)
+
         try:
             remote_file = self.sftp_client.open(self.log_path, "r")
-            
-            for line in remote_file:
-                line = line.rstrip("\n")
-                if not line:
-                    continue
-                
-                entry = self._parse_line(line)
-                if entry is None:
-                    continue
-                
-                if start_time and entry.timestamp < start_time:
-                    continue
-                if end_time and entry.timestamp > end_time:
-                    continue
-                
-                yield entry
+            if start_offset > 0:
+                try:
+                    stat = self.sftp_client.stat(self.log_path)
+                    if start_offset <= stat.st_size:
+                        remote_file.seek(start_offset)
+                except Exception:
+                    pass
 
-            if follow:
-                while True:
-                    line = remote_file.readline()
-                    if not line:
+            passed_seen_line = (last_line_seen == "")
+            line_count = 0
+
+            while True:
+                pos = remote_file.tell()
+                line = remote_file.readline()
+                if not line:
+                    if follow:
                         time.sleep(0.5)
                         continue
-                    line = line.rstrip("\n")
-                    if not line:
-                        continue
-                    
-                    entry = self._parse_line(line)
-                    if entry is None:
-                        continue
-                    
-                    if end_time and entry.timestamp > end_time:
-                        break
-                    
-                    yield entry
-            
+                    break
+                line = line.rstrip("\n\r")
+                if not line:
+                    continue
+
+                if not passed_seen_line and last_line_seen:
+                    if line == last_line_seen:
+                        passed_seen_line = True
+                    line_count += len(line.encode("utf-8", errors="replace")) + 1
+                    current_cursor["last_offset"] = start_offset + line_count
+                    current_cursor["last_line"] = line
+                    continue
+                passed_seen_line = True
+
+                entry = self._parse_line(line)
+                if entry is None:
+                    line_count += len(line.encode("utf-8", errors="replace")) + 1
+                    current_cursor["last_offset"] = start_offset + line_count
+                    current_cursor["last_line"] = line
+                    continue
+
+                if start_time and entry.timestamp < start_time:
+                    line_count += len(line.encode("utf-8", errors="replace")) + 1
+                    current_cursor["last_offset"] = start_offset + line_count
+                    current_cursor["last_line"] = line
+                    current_cursor["last_timestamp"] = entry.timestamp.isoformat()
+                    continue
+                if end_time and entry.timestamp > end_time:
+                    break
+
+                line_count += len(line.encode("utf-8", errors="replace")) + 1
+                current_cursor["last_offset"] = start_offset + line_count
+                current_cursor["last_line"] = line
+                current_cursor["last_timestamp"] = entry.timestamp.isoformat()
+                current_cursor["last_message_hash"] = entry.dedup_key()
+                yield entry, dict(current_cursor)
+
             remote_file.close()
         except Exception as e:
             raise RuntimeError(f"Error fetching logs from {self.host}: {e}")

@@ -1,1 +1,1 @@
-from .manager import SessionManager, AnalysisSession
+from .manager import SessionManager, AnalysisSession, SourceCursor
