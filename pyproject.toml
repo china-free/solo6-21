@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "logalyzer"
+version = "0.1.0"
+description = "Multi-source log aggregation and analysis CLI tool"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.8,<4.0"
+click = "^8.1.0"
+pyyaml = "^6.0"
+paramiko = "^3.4.0"
+boto3 = "^1.34.0"
+colorama = "^0.4.6"
+tqdm = "^4.66.0"
+
+[tool.poetry.scripts]
+logalyzer = "logalyzer.cli.main:cli"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

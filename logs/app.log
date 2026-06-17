@@ -1,0 +1,24 @@
+2026-06-17 10:00:01,123 [INFO] [main] Application started successfully
+2026-06-17 10:00:02,456 [DEBUG] [main] Loading configuration from /etc/app/config.yaml
+2026-06-17 10:00:03,789 [INFO] [database] Connecting to database at db.example.com:5432
+2026-06-17 10:00:04,012 [INFO] [database] Database connection established
+2026-06-17 10:00:05,345 [INFO] [api] Starting HTTP server on port 8080
+2026-06-17 10:00:10,567 [INFO] [api] GET /api/users - 200 OK (45ms)
+2026-06-17 10:00:11,890 [DEBUG] [api] Request headers: {"Content-Type": "application/json"}
+2026-06-17 10:00:15,234 [WARN] [api] Slow response detected: GET /api/reports - 5200ms
+2026-06-17 10:00:20,567 [INFO] [api] POST /api/login - 200 OK (120ms)
+2026-06-17 10:00:25,890 [ERROR] [api] Database connection failed: Connection refused
+2026-06-17 10:00:26,123 [ERROR] [api] Database connection failed: Connection refused
+2026-06-17 10:00:27,456 [ERROR] [api] Database connection failed: Connection refused
+2026-06-17 10:00:28,789 [ERROR] [api] Database connection failed: Connection refused
+2026-06-17 10:00:30,012 [ERROR] [api] Database connection failed: Connection refused
+2026-06-17 10:00:35,345 [WARN] [api] Retrying database connection (attempt 1/5)
+2026-06-17 10:00:40,567 [INFO] [database] Database reconnected successfully
+2026-06-17 10:00:45,890 [INFO] [api] GET /api/orders - 200 OK (280ms)
+2026-06-17 10:00:50,234 [ERROR] [payment] Payment processing failed: Invalid card number
+2026-06-17 10:00:55,567 [WARN] [cache] Cache eviction triggered: memory usage at 85%
+2026-06-17 10:01:00,890 [INFO] [main] Scheduled task completed: cleanup_old_sessions
+2026-06-17 10:01:05,123 [DEBUG] [api] User authentication successful: user123
+2026-06-17 10:01:10,456 [ERROR] [api] OutOfMemoryError: Java heap space
+2026-06-17 10:01:15,789 [FATAL] [main] Application terminated due to unhandled exception
+2026-06-17 10:01:20,012 [INFO] [main] Application shutdown complete

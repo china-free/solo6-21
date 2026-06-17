@@ -1,0 +1,104 @@
+session_dir: .logalyzer_sessions
+log_level: INFO
+
+sources:
+  - name: local-app
+    type: local
+    enabled: true
+    config:
+      path: ./logs/app.log
+      encoding: utf-8
+      log_format:
+        timestamp:
+          regex: '(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})'
+          format: '%Y-%m-%d %H:%M:%S,%f'
+        level:
+          regex: '\[(DEBUG|INFO|WARN|ERROR|FATAL)\]'
+        fields:
+          thread:
+            regex: '\[([^\]]+)\]'
+
+  - name: ssh-webserver
+    type: ssh
+    enabled: false
+    config:
+      host: 192.168.1.100
+      port: 22
+      username: root
+      password: secret
+      log_path: /var/log/nginx/access.log
+      log_format:
+        timestamp:
+          regex: '\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4})\]'
+          format: '%d/%b/%Y:%H:%M:%S %z'
+
+  - name: ssh-database
+    type: ssh
+    enabled: false
+    config:
+      host: 192.168.1.101
+      port: 22
+      username: postgres
+      key_file: ~/.ssh/id_rsa
+      log_path: /var/log/postgresql/postgresql.log
+      log_format:
+        timestamp:
+          regex: '(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})'
+          format: '%Y-%m-%d %H:%M:%S'
+
+  - name: s3-archive
+    type: cloud
+    enabled: false
+    config:
+      provider: s3
+      bucket: company-logs
+      prefix: production/app/
+      region: cn-north-1
+      access_key: YOUR_ACCESS_KEY
+      secret_key: YOUR_SECRET_KEY
+      endpoint_url: https://s3.cn-north-1.amazonaws.com.cn
+
+  - name: minio-storage
+    type: cloud
+    enabled: false
+    config:
+      provider: s3
+      bucket: logs
+      prefix: app/
+      region: us-east-1
+      access_key: minioadmin
+      secret_key: minioadmin
+      endpoint_url: http://localhost:9000
+
+alert_rules:
+  - name: high-error-rate
+    pattern: ERROR
+    is_regex: false
+    severity: error
+    threshold: 5
+    window_seconds: 60
+    action: console
+
+  - name: db-connection-error
+    pattern: '.*Database connection.*'
+    is_regex: true
+    severity: critical
+    threshold: 1
+    window_seconds: 60
+    action: console
+
+  - name: slow-api-response
+    pattern: 'response.*>\s*5000'
+    is_regex: true
+    severity: warning
+    threshold: 3
+    window_seconds: 300
+    action: console
+
+  - name: out-of-memory
+    pattern: OutOfMemoryError
+    is_regex: false
+    severity: critical
+    threshold: 1
+    window_seconds: 60
+    action: console
