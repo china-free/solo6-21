@@ -59,17 +59,23 @@ class Alert:
 class AlertState:
     rule_name: str
     match_times: deque = field(default_factory=deque)
+    matched_entries: deque = field(default_factory=deque)
     last_alert_time: Optional[datetime] = None
     cooldown_seconds: int = 60
 
-    def add_match(self, timestamp: datetime) -> int:
+    def add_match(self, timestamp: datetime, entry: LogEntry) -> int:
         self.match_times.append(timestamp)
+        self.matched_entries.append(entry)
         return len(self.match_times)
 
     def cleanup_old(self, window_end: datetime, window_seconds: int) -> None:
         cutoff = window_end - timedelta(seconds=window_seconds)
         while self.match_times and self.match_times[0] < cutoff:
             self.match_times.popleft()
+            self.matched_entries.popleft()
+
+    def get_window_entries(self) -> List[LogEntry]:
+        return list(self.matched_entries)
 
     def should_alert(self, current_time: datetime) -> bool:
         if self.last_alert_time is None:
@@ -139,20 +145,20 @@ class AlertEngine:
         for rule in self.rules:
             if rule.matches(entry):
                 state = self.states.setdefault(rule.name, AlertState(rule_name=rule.name))
-                count = state.add_match(entry.timestamp)
+                state.add_match(entry.timestamp, entry)
                 state.cleanup_old(entry.timestamp, rule.window_seconds)
                 
                 if len(state.match_times) >= rule.threshold:
                     if state.should_alert(entry.timestamp):
+                        window_entries = state.get_window_entries()
                         alert = Alert(
                             rule_name=rule.name,
                             severity=rule.severity,
                             message=f"Pattern '{rule.pattern}' matched {len(state.match_times)} times in {rule.window_seconds}s",
                             timestamp=entry.timestamp,
-                            matched_entries=list(state.match_times) if isinstance(state.match_times, list) else [],
+                            matched_entries=window_entries,
                             count=len(state.match_times),
                         )
-                        alert.matched_entries = [entry]
                         self.alerts.append(alert)
                         state.record_alert(entry.timestamp)
                         triggered_alerts.append(alert)
@@ -198,6 +204,7 @@ class AlertEngine:
             "states": {
                 name: {
                     "match_times": [t.isoformat() for t in state.match_times],
+                    "matched_entries": [e.to_dict() for e in state.matched_entries],
                     "last_alert_time": state.last_alert_time.isoformat() if state.last_alert_time else None,
                     "cooldown_seconds": state.cooldown_seconds,
                 }
@@ -232,6 +239,8 @@ class AlertEngine:
             )
             for ts_str in state_data.get("match_times", []):
                 state.match_times.append(datetime.fromisoformat(ts_str))
+            for entry_data in state_data.get("matched_entries", []):
+                state.matched_entries.append(LogEntry.from_dict(entry_data))
             if state_data.get("last_alert_time"):
                 state.last_alert_time = datetime.fromisoformat(state_data["last_alert_time"])
             engine.states[name] = state
